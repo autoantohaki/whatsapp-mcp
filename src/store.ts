@@ -25,6 +25,25 @@ export interface StoredChat {
   readonly lastCheckedAt?: string;
 }
 
+export type AutopilotMode = "off" | "notify" | "draft";
+
+export interface AutopilotSetting {
+  readonly chatId: string;
+  readonly mode: AutopilotMode;
+  /** Claude conversation to continue for this client, when one is linked. */
+  readonly sessionId?: string;
+  readonly instructions?: string;
+}
+
+export interface Draft {
+  readonly id: number;
+  readonly chatId: string;
+  readonly text: string;
+  readonly status: "pending" | "sent" | "discarded" | "superseded";
+  readonly noticeMessageId?: string;
+  readonly createdAt: string;
+}
+
 export interface InboxEntry {
   readonly chat: StoredChat;
   readonly newMessages: number;
@@ -70,6 +89,21 @@ export class MessageStore {
         alias TEXT PRIMARY KEY,
         canonical TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS autopilot (
+        chat_id TEXT PRIMARY KEY,
+        mode TEXT NOT NULL,
+        session_id TEXT,
+        instructions TEXT,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS drafts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        notice_message_id TEXT,
+        created_at TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS messages_chat_time ON messages (chat_id, occurred_at);
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         text, content='messages', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2'
@@ -98,6 +132,63 @@ export class MessageStore {
 
   private all(sql: string, ...params: unknown[]): Row[] {
     return this.db.prepare(sql).all(...params.map(bindable)) as Row[];
+  }
+
+  getAutopilot(chatId: string): AutopilotSetting | undefined {
+    const row = this.get("SELECT * FROM autopilot WHERE chat_id = ?", chatId);
+    return row ? toAutopilot(row) : undefined;
+  }
+
+  listAutopilot(): AutopilotSetting[] {
+    return this.all("SELECT * FROM autopilot WHERE mode <> 'off' ORDER BY chat_id").map(toAutopilot);
+  }
+
+  setAutopilot(setting: AutopilotSetting, at: string): void {
+    this.run(
+      `INSERT INTO autopilot (chat_id, mode, session_id, instructions, updated_at) VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(chat_id) DO UPDATE SET mode = excluded.mode, session_id = excluded.session_id,
+         instructions = excluded.instructions, updated_at = excluded.updated_at`,
+      setting.chatId,
+      setting.mode,
+      setting.sessionId,
+      setting.instructions,
+      at,
+    );
+  }
+
+  createDraft(chatId: string, text: string, at: string): Draft {
+    this.run("UPDATE drafts SET status = 'superseded' WHERE chat_id = ? AND status = 'pending'", chatId);
+    const result = this.run(
+      "INSERT INTO drafts (chat_id, text, status, created_at) VALUES (?, ?, 'pending', ?)",
+      chatId,
+      text,
+      at,
+    );
+    return this.getDraft(Number(result.lastInsertRowid))!;
+  }
+
+  getDraft(id: number): Draft | undefined {
+    const row = this.get("SELECT * FROM drafts WHERE id = ?", id);
+    return row ? toDraft(row) : undefined;
+  }
+
+  draftByNotice(noticeMessageId: string): Draft | undefined {
+    const row = this.get("SELECT * FROM drafts WHERE notice_message_id = ?", noticeMessageId);
+    return row ? toDraft(row) : undefined;
+  }
+
+  latestPendingDraft(): Draft | undefined {
+    const row = this.get("SELECT * FROM drafts WHERE status = 'pending' ORDER BY id DESC LIMIT 1");
+    return row ? toDraft(row) : undefined;
+  }
+
+  pendingDrafts(): Draft[] {
+    return this.all("SELECT * FROM drafts WHERE status = 'pending' ORDER BY id").map(toDraft);
+  }
+
+  updateDraft(id: number, change: { status?: Draft["status"]; noticeMessageId?: string }): void {
+    if (change.status) this.run("UPDATE drafts SET status = ? WHERE id = ?", change.status, id);
+    if (change.noticeMessageId) this.run("UPDATE drafts SET notice_message_id = ? WHERE id = ?", change.noticeMessageId, id);
   }
 
   lidChatIds(): string[] {
@@ -303,6 +394,28 @@ function toChat(row: Row): StoredChat {
       lastActivityAt: optional<string>(row.last_activity_at) || undefined,
       lastCheckedAt: optional<string>(row.last_checked_at),
     }),
+  };
+}
+
+function toAutopilot(row: Row): AutopilotSetting {
+  return {
+    chatId: String(row.chat_id),
+    mode: row.mode as AutopilotMode,
+    ...withDefined({
+      sessionId: optional<string>(row.session_id),
+      instructions: optional<string>(row.instructions),
+    }),
+  };
+}
+
+function toDraft(row: Row): Draft {
+  return {
+    id: Number(row.id),
+    chatId: String(row.chat_id),
+    text: String(row.text),
+    status: row.status as Draft["status"],
+    createdAt: String(row.created_at),
+    ...withDefined({ noticeMessageId: optional<string>(row.notice_message_id) }),
   };
 }
 

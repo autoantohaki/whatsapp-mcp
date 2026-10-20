@@ -59,7 +59,7 @@ export class FakeMessagingChannel implements MessagingChannel {
     return {
       status: this.currentStatus,
       linkedIdentity: {
-        externalId: "fake-owner",
+        externalId: "5511900000000@c.us",
         displayName: "Fake owner",
         platform: "fake",
       },
@@ -155,7 +155,7 @@ export class FakeMessagingChannel implements MessagingChannel {
       provider: "fake",
       providerMessageId: result.providerMessageId,
       chatExternalId: command.chatExternalId,
-      senderExternalId: "fake-owner",
+      senderExternalId: "5511900000000@c.us",
       direction: "outbound",
       origin: "agent",
       kind: "text",
@@ -177,7 +177,7 @@ export class FakeMessagingChannel implements MessagingChannel {
     const acceptedAt=this.now().toISOString();const result:SendResult={providerMessageId:`fake-${++this.sequence}`,chatExternalId:command.chatExternalId,acceptedAt};
     this.sendsByKey.set(command.idempotencyKey,result);
     const kind=command.mimeType.startsWith('image/')?'image':command.mimeType.startsWith('audio/')?'audio':command.mimeType.startsWith('video/')?'video':'document';
-    const message:NormalizedMessage={provider:'fake',providerMessageId:result.providerMessageId,chatExternalId:command.chatExternalId,senderExternalId:'fake-owner',direction:'outbound',origin:'agent',kind,text:command.caption??'',occurredAt:acceptedAt,media:{mimeType:command.mimeType,filename:command.filename,hasMedia:true}};
+    const message:NormalizedMessage={provider:'fake',providerMessageId:result.providerMessageId,chatExternalId:command.chatExternalId,senderExternalId:"5511900000000@c.us",direction:'outbound',origin:'agent',kind,text:command.caption??'',occurredAt:acceptedAt,media:{mimeType:command.mimeType,filename:command.filename,hasMedia:true}};
     this.messages.push(message);this.upsertChatFromMessage(message);this.recordRawMessage(message);this.recordEmittedMessage(message);await this.events.emit('message',message);return result;
   }
 

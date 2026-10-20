@@ -12,6 +12,9 @@ import { FakeMessagingChannel } from "./whatsapp/fake-channel.ts";
 import { WhatsAppWebChannel } from "./whatsapp/web-channel.ts";
 import { WhatsAppService } from "./whatsapp-service.ts";
 import { pairingPage } from "./pairing-page.ts";
+import { Autopilot, type AgentRunner } from "./autopilot.ts";
+import { LiveFeed } from "./live-feed.ts";
+import { createClaudeRunner, sessionInUse } from "./agent-runner.ts";
 import QRCode from "qrcode";
 
 export interface ServiceInfo {
@@ -77,7 +80,20 @@ function createChannel(): MessagingChannel {
   });
 }
 
-type Handler = (service: WhatsAppService, params: Record<string, any>, channel: MessagingChannel) => unknown;
+interface Context {
+  readonly service: WhatsAppService;
+  readonly channel: MessagingChannel;
+  readonly autopilot: Autopilot;
+  readonly store: MessageStore;
+}
+
+type Handler = (service: WhatsAppService, params: Record<string, any>, channel: MessagingChannel, context: Context) => unknown;
+
+/** Test stand-in for the background Claude run: proposes an echo reply. */
+const fakeRunner: AgentRunner = async (run) => {
+  await run.tools.proposeReply(`Recebido, ${run.clientName}. O doutor responde em breve.`);
+  return { sessionId: "fake-session" };
+};
 
 const methods: Record<string, Handler> = {
   status: (service) => service.pairing(),
@@ -89,6 +105,22 @@ const methods: Record<string, Handler> = {
   send: (service, params) => service.send(params as any),
   sendFile: (service, params) => service.sendFile(params as any),
   downloadMedia: (service, params) => service.downloadMedia(params as any),
+  setAlerts: async (service, params, _channel, { autopilot }) => {
+    const chatId = await service.resolveChat(String(params.chat ?? ""));
+    return autopilot.configure({
+      chatId,
+      mode: params.mode,
+      ...(params.sessionId ? { sessionId: params.sessionId } : {}),
+      ...(params.instructions ? { instructions: params.instructions } : {}),
+    });
+  },
+  listAlerts: (_service, _params, _channel, { autopilot, store }) =>
+    autopilot.list().map((setting) => ({ ...setting, name: store.getChat(setting.chatId)?.name ?? setting.chatId })),
+  getAlert: async (service, params, _channel, { store }) => {
+    const chatId = await service.resolveChat(String(params.chat ?? ""));
+    return store.getAutopilot(chatId) ?? { chatId, mode: "off" };
+  },
+  pendingDrafts: (_service, _params, _channel, { autopilot }) => autopilot.pendingDrafts(),
   // Test hooks, only meaningful with WHATSAPP_MCP_FAKE=1.
   fakeInject: async (_service, params, channel) => {
     if (!(channel instanceof FakeMessagingChannel)) throw new Error("Not a test service");
@@ -121,6 +153,35 @@ async function main(): Promise<void> {
   const store = new MessageStore(paths.database);
   const channel = createChannel();
   const service = new WhatsAppService({ channel, store, qrImagePath: paths.qrImage, workspaceRoot: ROOT, log });
+  const feed = new LiveFeed();
+  const autopilot = new Autopilot({
+    channel,
+    store,
+    runAgent: process.env.WHATSAPP_MCP_FAKE_AGENT === "1" ? fakeRunner : createClaudeRunner(ROOT, log),
+    readChat: async (chatId, limit, before) =>
+      (await service.read({ chat: chatId, ...(limit ? { limit } : {}), ...(before ? { before } : {}), markRead: false })).messages,
+    canonicalId: (id) => service.canonicalId(id),
+    sessionInUse,
+    handledLive: (chatId, mode) => feed.hasLiveWatcher(chatId, mode),
+    ...(process.env.AUTOPILOT_DEBOUNCE_MS ? { debounceMs: Number(process.env.AUTOPILOT_DEBOUNCE_MS) } : {}),
+    log,
+  });
+  const context: Context = { service, channel, autopilot, store };
+  service.onLiveMessage(async (message) => {
+    if (message.direction === "inbound" && !message.chatExternalId.endsWith("@g.us")) {
+      feed.push({
+        chatId: message.chatExternalId,
+        chatName: store.getChat(message.chatExternalId)?.name ?? message.chatExternalId,
+        alertMode: store.getAutopilot(message.chatExternalId)?.mode ?? "off",
+        messageId: message.providerMessageId,
+        kind: message.kind,
+        text: message.text,
+        occurredAt: message.occurredAt,
+        ...(message.media?.filename ? { mediaFilename: message.media.filename } : {}),
+      });
+    }
+    await autopilot.onLiveMessage(message);
+  });
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? "/", "http://127.0.0.1");
@@ -131,6 +192,15 @@ async function main(): Promise<void> {
       if (request.method === "GET" && url.pathname === "/health") return reply(response, 200, { ok: true, pid: process.pid });
       if (request.method === "GET" && url.pathname === "/pair") return reply(response, 200, pairingPage(token), "text/html");
       if (request.method === "GET" && url.pathname === "/pair/state") return reply(response, 200, service.pairing());
+      if (request.method === "GET" && url.pathname === "/events") {
+        const events = await feed.next({
+          after: Number(url.searchParams.get("after") ?? feed.latestSeq()),
+          session: url.searchParams.get("session") ?? "unknown",
+          watch: url.searchParams.get("watch") ?? "alerts",
+          timeoutMs: Math.min(30_000, Number(url.searchParams.get("wait") ?? 25_000)),
+        });
+        return reply(response, 200, { events, latest: feed.latestSeq() });
+      }
       if (request.method === "GET" && url.pathname === "/pair/qr.svg") {
         const qr = service.pairing().qr;
         if (!qr) return reply(response, 404, { error: "no QR code right now" });
@@ -145,7 +215,7 @@ async function main(): Promise<void> {
         const { method, params } = await readBody(request);
         const handler = methods[method];
         if (!handler) return reply(response, 404, { error: `Unknown method ${method}` });
-        return reply(response, 200, { result: await handler(service, params ?? {}, channel) });
+        return reply(response, 200, { result: await handler(service, params ?? {}, channel, context) });
       }
       reply(response, 404, { error: "not found" });
     } catch (cause) {

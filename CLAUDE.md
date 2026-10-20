@@ -16,6 +16,8 @@ This folder gives you WhatsApp through an MCP server called `whatsapp` (configur
 | `whatsapp_send` | Sends a text message. **Real message to a real client.** |
 | `whatsapp_send_file` | Sends a file from this computer, with an optional caption. **Real.** |
 | `whatsapp_download_media` | Saves a document, photo or audio a client sent into a folder, so you can read it. |
+| `whatsapp_alerts` | Per client: what happens when they write (`off`, `notify`, `draft`). No arguments lists who has alerts on. |
+| `whatsapp_watch` | In a live conversation (see below), choose which client's messages arrive here as they come in. |
 
 There is one background WhatsApp service per computer. The first tool call in any session starts it, and it keeps running after Claude closes so incoming messages are still saved in `data/messages.db`. Many Claude sessions can use WhatsApp at the same time without conflict.
 
@@ -32,6 +34,7 @@ The SessionStart hook prints either `WhatsApp setup OK` or `WHATSAPP SETUP NEEDE
 3. **Load the tools.** If the `whatsapp` tools were not available at session start, they will not appear in this session by themselves. Don't make him fiddle with commands: keep going with the command-line fallback below, and tell him that **any new conversation in this folder** will have WhatsApp built in (no need to close Claude).
 4. **Link WhatsApp (once per computer).** Call `whatsapp_status`. It opens a page in his browser with a QR code. Tell him: *open WhatsApp on your phone → Linked devices (Dispositivos conectados) → Link a device (Conectar um dispositivo) → point the camera at the code*. Call `whatsapp_status` again until it says connected.
 5. Create `clients/` if missing and briefly explain the routine below.
+6. **Ask how he wants to be alerted** (see "Alerts when a client writes"). Explain the three options in two or three plain sentences, and set what he picks for each client as you create them. Everything is off until he chooses. He can change it any time just by asking.
 
 **Command-line fallback** (same service, same rules, for when the `whatsapp` tools are missing from a session):
 `npm run wa -- status` (opens the QR page if needed), `npm run wa -- inbox`, `npm run wa -- read "{\"chat\":\"Maria Silva\"}"`, and likewise `findChat`, `search`, `send`, `sendFile`, `downloadMedia`, `restart` with JSON params named like the tool arguments (`chat`, `text`, `replyTo`, `path`, `caption`, `messageId`, `folder`, `query`, `limit`, `before`). The approval rule for sending applies exactly the same.
@@ -82,6 +85,18 @@ WhatsApp chat id: <id>   Phone: <number>
 
 If he talks about a different client in a client's session, point it out and suggest opening (or going back to) that client's session.
 
+## Alerts when a client writes
+
+Messages are always saved, but by default nothing happens when a client writes until someone looks. Per client, with `whatsapp_alerts`, he can choose:
+
+- **off** (default): nothing happens. He checks the inbox when he wants.
+- **notify**: he gets a short note in his own WhatsApp chat ("Message yourself" / "Você") the moment the client writes.
+- **draft**: Claude reacts by itself. When the client writes, a background Claude run continues *that client's conversation* (if linked), reads the notes and the chat, and sends a suggested reply to his own WhatsApp chat. He answers there from his phone: **ok** sends it, **não** discards it, **enviar: <texto>** sends his own text, and anything else ("mais formal", "diga que ligo amanhã") makes Claude write a new version. **Nothing reaches the client without his OK.**
+
+To link a client's conversation for drafts, call `whatsapp_alerts` from inside that client's conversation with `session_id` = the id printed at session start ("This conversation's session id: …"). Do this when you set up a new client, if he chose `draft`. Background drafts use his Claude plan, like any other conversation.
+
+**Live in an open conversation.** If he prefers to watch on the computer, he can start Claude with `start-live.cmd` (double-click it in this folder; on Mac/Linux `./start-live.sh`). Claude Code asks once to allow the WhatsApp "development channel"; he chooses to allow it. In that conversation, new messages from clients with alerts on arrive straight to you while you are open, with no need for him to prompt you. In a client's conversation, call `whatsapp_watch` with that client so only their messages arrive. When a message arrives, react right away: catch up and draft a reply for his approval on screen. While a live conversation is following a client, background drafts for that client pause so he doesn't get the same draft twice. This is a Claude Code research-preview feature that works in the terminal, not in the desktop app.
+
 ## Sending messages: always with his approval
 
 - **Never send anything without his explicit OK on the exact text (or file).** Draft the message, show it to him, and send only after he approves. If he edits it, send his version exactly.
@@ -97,6 +112,7 @@ Client conversations and documents are confidential (attorney-client privilege).
 
 ## For maintainers
 
+- `src/autopilot.ts` + `src/agent-runner.ts`: per-client alerts and background drafts (Claude Agent SDK, resuming the client's session; approval via the owner's own WhatsApp chat). `src/live-feed.ts` + the channel in `src/mcp.ts`: live push into sessions started with `start-live`.
 - `src/mcp.ts`: MCP tools (one process per Claude session). `src/service.ts`: the single background service (HTTP on 127.0.0.1 with a random port and token in `data/service.json`). `src/whatsapp-service.ts`: the logic. `src/store.ts`: SQLite archive with full-text search. `src/whatsapp/web-channel.ts`: the whatsapp-web.js adapter, ported from the Panop project.
 - Runs TypeScript directly with Node's built-in type stripping (no build step). `npm test` runs everything against a fake WhatsApp; `npm run typecheck` checks types.
 - whatsapp-web.js is an unofficial WhatsApp Web client. A future move to the official WhatsApp Business Platform would only replace `src/whatsapp/web-channel.ts`.

@@ -12,8 +12,9 @@ const problems = [];
 if (major < 22 || (major === 22 && minor < 18)) {
   problems.push(`Node.js ${process.versions.node} is too old (need 22.18 or newer, LTS recommended).`);
 }
-if (!existsSync(join(root, "node_modules", "whatsapp-web.js"))) {
-  problems.push("Dependencies are not installed yet (npm install has not run).");
+const needed = ["whatsapp-web.js", "@modelcontextprotocol/sdk", "@anthropic-ai/claude-agent-sdk"];
+if (needed.some((name) => !existsSync(join(root, "node_modules", name)))) {
+  problems.push("Dependencies are missing or outdated (run npm install).");
 }
 
 if (problems.length) {
@@ -31,4 +32,16 @@ if (problems.length) {
   console.log(
     `WhatsApp setup OK. Login saved on this computer: ${linked ? "yes" : "no (needs QR pairing)"}. Background service: ${service}.`,
   );
+}
+
+// Claude Code passes the session details on stdin. The id lets whatsapp_alerts
+// link this conversation to a client for background drafts.
+try {
+  const input = process.stdin.isTTY ? {} : JSON.parse(readFileSync(0, "utf8") || "{}");
+  if (input.session_id) console.log(`This conversation's session id: ${input.session_id}`);
+} catch {
+  // not started by Claude Code
+}
+if (process.env.WHATSAPP_LIVE === "1") {
+  console.log("Live WhatsApp messages are ON in this conversation (started with the live launcher).");
 }

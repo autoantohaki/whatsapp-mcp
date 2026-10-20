@@ -5,10 +5,28 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import type { StoredChat, StoredMessage } from "./store.ts";
-import { callService, openInBrowser, pairingUrl } from "./service-client.ts";
+import { randomUUID } from "node:crypto";
+import { callService, ensureService, openInBrowser, pairingUrl } from "./service-client.ts";
+import type { LiveEvent } from "./live-feed.ts";
 import type { PairingState } from "./whatsapp-service.ts";
 
-const server = new McpServer({ name: "whatsapp", version: "0.1.0" });
+// Set by the "live" launcher, which starts Claude Code with this server as a channel.
+const LIVE = process.env.WHATSAPP_LIVE === "1";
+
+const server = new McpServer(
+  { name: "whatsapp", version: "0.2.0" },
+  {
+    capabilities: { experimental: { "claude/channel": {} } },
+    instructions: LIVE
+      ? 'New client messages arrive live as <channel source="whatsapp"> events. When one arrives: if this conversation is about that client, ' +
+        "catch up (notes.md, whatsapp_read) and draft a reply for the user to approve; never send without the user's OK. " +
+        "If it is about another client, tell the user in one line who wrote and suggest opening that client's conversation."
+      : undefined,
+  },
+);
+
+/** Which chat this conversation follows live: one chat id, or every chat with alerts on. */
+let watching = "alerts";
 
 type Content = { type: "text"; text: string } | { type: "image"; data: string; mimeType: string };
 
@@ -283,4 +301,110 @@ tool(
   },
 );
 
+tool(
+  "whatsapp_alerts",
+  {
+    title: "WhatsApp alerts per client",
+    description:
+      "Shows or changes what happens when a client writes, per chat. Modes: " +
+      "'off' (default, nothing happens); 'notify' (the lawyer gets a note in his own WhatsApp chat \"Message yourself\"); " +
+      "'draft' (Claude prepares a reply in the background inside this client's conversation and sends it to the lawyer's own WhatsApp chat; " +
+      "he answers 'ok' to send it, 'não' to discard, or says what to change. Nothing is sent without his OK). " +
+      "Pass session_id (printed at session start) to link this client's Claude conversation, so background drafts continue it. " +
+      "Call with no arguments to list every client that has alerts on.",
+    inputSchema: {
+      chat: z.string().optional(),
+      mode: z.enum(["off", "notify", "draft"]).optional(),
+      session_id: z.string().optional().describe("This conversation's session id, to link it to the client."),
+      instructions: z.string().optional().describe("Standing instructions for drafts for this client, e.g. 'always formal'."),
+    },
+    readOnly: false,
+  },
+  async ({ chat, mode, session_id, instructions }) => {
+    if (!chat) {
+      const list = await callService<Array<{ name: string; chatId: string; mode: string; sessionId?: string }>>("listAlerts");
+      return text(
+        list.length
+          ? list.map((item) => `- ${item.name} (${item.chatId}): ${item.mode}${item.sessionId ? ", linked to a conversation" : ""}`).join("\n")
+          : "No client has alerts on.",
+      );
+    }
+    if (!mode) {
+      const current = await callService<{ chatId: string; mode: string }>("getAlert", { chat });
+      return text(`${current.chatId}: ${current.mode}`);
+    }
+    const setting = await callService<{ chatId: string; mode: string; sessionId?: string }>("setAlerts", {
+      chat,
+      mode,
+      sessionId: session_id,
+      instructions,
+    });
+    return text(`Alerts for ${setting.chatId} set to ${setting.mode}${setting.sessionId ? " (linked to a conversation)" : ""}.`);
+  },
+);
+
+tool(
+  "whatsapp_watch",
+  {
+    title: "Follow a client live in this conversation",
+    description:
+      "Only works when Claude was started with the live launcher (start-live). Makes this conversation receive new WhatsApp " +
+      "messages from one chat as they arrive (pass chat), or from every client with alerts on (chat='all', the default).",
+    inputSchema: { chat: z.string() },
+    readOnly: false,
+  },
+  async ({ chat }) => {
+    if (!LIVE) {
+      return text(
+        "Live messages are not active in this conversation (Claude was not started with the live launcher). " +
+          "Alerts set with whatsapp_alerts still work.",
+      );
+    }
+    if (chat === "all") {
+      watching = "alerts";
+      return text("This conversation now receives new messages from every client with alerts on.");
+    }
+    const found = await callService<{ chatId: string }>("getAlert", { chat });
+    watching = found.chatId;
+    return text(`This conversation now receives new messages from ${found.chatId} as they arrive.`);
+  },
+);
+
+function describeEvent(event: LiveEvent): string {
+  const attachment = event.kind !== "text" ? ` [${event.kind}${event.mediaFilename ? `: ${event.mediaFilename}` : ""}]` : "";
+  return `New WhatsApp message from ${event.chatName} (chat id ${event.chatId}) at ${when(event.occurredAt)}:${attachment} ${event.text}`.trim();
+}
+
+/** Long-polls the background service and pushes client messages into this Claude session. */
+async function relayLiveMessages(): Promise<void> {
+  const session = randomUUID();
+  let after: number | undefined;
+  for (;;) {
+    try {
+      const info = await ensureService();
+      const query = new URLSearchParams({ session, watch: watching, wait: "25000", ...(after !== undefined ? { after: String(after) } : {}) });
+      const response = await fetch(`http://127.0.0.1:${info.port}/events?${query}`, {
+        headers: { authorization: `Bearer ${info.token}` },
+        signal: AbortSignal.timeout(40_000),
+      });
+      const body = (await response.json()) as { events: LiveEvent[]; latest: number };
+      for (const event of body.events) {
+        const relevant = watching === "alerts" ? event.alertMode !== "off" : event.chatId === watching;
+        if (!relevant) continue;
+        await server.server.notification({
+          method: "notifications/claude/channel",
+          params: {
+            content: describeEvent(event),
+            meta: { chat_id: event.chatId, chat_name: event.chatName, message_id: event.messageId },
+          },
+        });
+      }
+      after = body.latest;
+    } catch {
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+  }
+}
+
 await server.connect(new StdioServerTransport());
+if (LIVE) void relayLiveMessages();

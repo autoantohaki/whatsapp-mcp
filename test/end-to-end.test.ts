@@ -7,10 +7,21 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import type { NormalizedMessage } from "../src/domain.ts";
 
 const dataDir = mkdtempSync(join(tmpdir(), "whatsapp-mcp-"));
-const env = { ...process.env, WHATSAPP_MCP_DATA: dataDir, WHATSAPP_MCP_FAKE: "1" } as Record<string, string>;
+const env = {
+  ...process.env,
+  WHATSAPP_MCP_DATA: dataDir,
+  WHATSAPP_MCP_FAKE: "1",
+  WHATSAPP_MCP_FAKE_AGENT: "1",
+  AUTOPILOT_DEBOUNCE_MS: "200",
+} as Record<string, string>;
 
-function connectClient(): { client: Client; transport: StdioClientTransport } {
-  const transport = new StdioClientTransport({ command: process.execPath, args: ["src/mcp.ts"], env, stderr: "ignore" });
+function connectClient(extraEnv: Record<string, string> = {}): { client: Client; transport: StdioClientTransport } {
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ["src/mcp.ts"],
+    env: { ...env, ...extraEnv },
+    stderr: "ignore",
+  });
   return { client: new Client({ name: "test", version: "1.0.0" }), transport };
 }
 
@@ -45,6 +56,15 @@ async function inject(
   expect(await response.json()).toEqual({ result: { ok: true } });
 }
 
+async function waitFor(check: () => Promise<boolean>, timeoutMs = 8000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await check()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
 let first: ReturnType<typeof connectClient>;
 let second: ReturnType<typeof connectClient>;
 
@@ -74,6 +94,7 @@ describe("WhatsApp MCP end to end (fake WhatsApp)", () => {
   it("lists the tools", async () => {
     const { tools } = await first.client.listTools();
     expect(tools.map((t) => t.name).sort()).toEqual([
+      "whatsapp_alerts",
       "whatsapp_download_media",
       "whatsapp_find_chat",
       "whatsapp_inbox",
@@ -82,6 +103,7 @@ describe("WhatsApp MCP end to end (fake WhatsApp)", () => {
       "whatsapp_send",
       "whatsapp_send_file",
       "whatsapp_status",
+      "whatsapp_watch",
     ]);
   });
 
@@ -156,6 +178,45 @@ describe("WhatsApp MCP end to end (fake WhatsApp)", () => {
 
   it("explains unknown chats instead of guessing", async () => {
     await expect(call(first.client, "whatsapp_read", { chat: "Nobody Like This" })).rejects.toThrow(/No WhatsApp chat matches/);
+  });
+
+  it("sends a background draft to the lawyer's own chat and sends it to the client only after 'ok'", async () => {
+    const client = "5511999990002@c.us";
+    expect(await call(first.client, "whatsapp_alerts", { chat: client, mode: "draft" })).toContain("set to draft");
+    expect(await call(first.client, "whatsapp_alerts")).toContain("draft");
+    await inject({ providerMessageId: "draft-in-1", text: "Doutor, a audiência foi remarcada?", chatExternalId: client, senderExternalId: client });
+
+    const owner = "5511900000000@c.us";
+    await waitFor(async () => (await call(first.client, "whatsapp_read", { chat: owner })).includes("Resposta sugerida"));
+    const before = await call(first.client, "whatsapp_read", { chat: client });
+    expect(before).not.toContain("O doutor responde em breve");
+
+    await inject({ providerMessageId: "owner-ok", text: "ok", chatExternalId: owner, senderExternalId: owner, direction: "outbound", origin: "owner" });
+    await waitFor(async () => (await call(first.client, "whatsapp_read", { chat: client })).includes("O doutor responde em breve"));
+    expect(await call(first.client, "whatsapp_read", { chat: owner })).toContain("✅ Enviado");
+  });
+
+  it("does nothing for clients without alerts", async () => {
+    const client = "5511999990003@c.us";
+    await inject({ providerMessageId: "quiet-1", text: "Oi", chatExternalId: client, senderExternalId: client });
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    expect(await call(first.client, "whatsapp_read", { chat: "5511900000000@c.us" })).not.toContain("Oi");
+  });
+
+  it("pushes client messages live into a conversation started with the live launcher", async () => {
+    const live = connectClient({ WHATSAPP_LIVE: "1" });
+    const received: string[] = [];
+    live.client.fallbackNotificationHandler = async (notification) => {
+      if (notification.method === "notifications/claude/channel") received.push(String((notification.params as any).content));
+    };
+    await live.client.connect(live.transport);
+    const client = "5511999990004@c.us";
+    await call(live.client, "whatsapp_alerts", { chat: client, mode: "notify" });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await inject({ providerMessageId: "live-1", text: "Chegou a intimação", chatExternalId: client, senderExternalId: client });
+    await waitFor(async () => received.some((content) => content.includes("Chegou a intimação")));
+    expect(received.join("\n")).not.toContain("draft-in-1");
+    await live.client.close();
   });
 
   it("keeps the service alive after a Claude session closes", async () => {

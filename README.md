@@ -12,6 +12,8 @@ Lets Claude Code read and send WhatsApp messages, so a law office can run one Cl
 
 Claude always shows you a message before sending it to a client and only sends after you say OK.
 
+Optional, per client: get a WhatsApp note when they write, or have Claude prepare a reply in the background that you approve from your phone ("ok" sends it). For live messages inside an open conversation, start Claude with `start-live.cmd`.
+
 ## How it works
 
 - `src/service.ts` keeps one WhatsApp Web connection running in the background (headless Edge/Chrome via whatsapp-web.js) and saves every message to `data/messages.db` (SQLite with full-text search).

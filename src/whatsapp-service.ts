@@ -44,6 +44,7 @@ export class WhatsAppService {
   private reconnectTimer?: NodeJS.Timeout;
   private stopping = false;
   private catchingUp?: Promise<void>;
+  private readonly liveListeners: Array<(message: NormalizedMessage) => Promise<void>> = [];
 
   constructor(options: WhatsAppServiceOptions) {
     this.options = options;
@@ -53,7 +54,8 @@ export class WhatsAppService {
     this.log = options.log ?? (() => undefined);
 
     this.channel.on("message", async (message) => {
-      await this.saveMessage(message);
+      const saved = await this.saveMessage(message);
+      if (saved) for (const listener of this.liveListeners) await listener(saved);
     });
     this.channel.on("qr", async ({ value }) => {
       this.currentQr = value;
@@ -62,6 +64,11 @@ export class WhatsAppService {
     });
     this.channel.on("status", (status) => this.onStatus(status));
     this.channel.on("error", ({ error }) => this.log(`WhatsApp error: ${error.message}`));
+  }
+
+  /** Called with each new message as it arrives live (not for imported history). */
+  onLiveMessage(listener: (message: NormalizedMessage) => Promise<void>): void {
+    this.liveListeners.push(listener);
   }
 
   async start(): Promise<void> {
@@ -184,7 +191,7 @@ export class WhatsAppService {
    * "@lid" IDs, and the same person can show up under both. Everything is
    * stored under the phone-number ID when WhatsApp tells us which one it is.
    */
-  private async canonicalId(id: string): Promise<string> {
+  async canonicalId(id: string): Promise<string> {
     if (!id.endsWith("@lid")) return id;
     const known = this.store.canonicalFor(id);
     if (known) return known;
@@ -195,10 +202,12 @@ export class WhatsAppService {
     return phoneId;
   }
 
-  private async saveMessage(message: NormalizedMessage): Promise<boolean> {
+  /** Saves a message under its canonical chat; returns it when it was new. */
+  private async saveMessage(message: NormalizedMessage): Promise<NormalizedMessage | undefined> {
     const chatExternalId = await this.canonicalId(String(message.chatExternalId ?? ""));
     const senderExternalId = await this.canonicalId(String(message.senderExternalId ?? ""));
-    return this.store.saveMessage({ ...message, chatExternalId, senderExternalId });
+    const canonical = { ...message, chatExternalId, senderExternalId };
+    return this.store.saveMessage(canonical) ? canonical : undefined;
   }
 
   private async importHistory(chatId: string, limit: number): Promise<number> {
