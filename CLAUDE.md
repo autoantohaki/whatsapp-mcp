@@ -29,9 +29,12 @@ The SessionStart hook prints either `WhatsApp setup OK` or `WHATSAPP SETUP NEEDE
    - Windows: `winget install --id OpenJS.NodeJS.LTS -e --accept-source-agreements --accept-package-agreements`. Windows may show a prompt asking for permission; tell him to click **Yes**. Afterwards Node may only be found in a new terminal; use the full path `"C:\Program Files\nodejs\node.exe"` / `npm.cmd` if needed.
    - macOS: `brew install node` if Homebrew exists; otherwise download the LTS installer from nodejs.org and open it.
 2. **Dependencies.** In this folder run `npm install`. It takes 1–3 minutes. On Windows it uses the Microsoft Edge that is already installed for WhatsApp; it downloads Chrome only if no Edge or Chrome is found.
-3. **Load the tools.** If the `whatsapp` tools were not available at session start, they will not appear by themselves. Ask him to type `/mcp`, choose `whatsapp`, and pick reconnect, or simply close and reopen Claude in this folder. Then continue.
+3. **Load the tools.** If the `whatsapp` tools were not available at session start, they will not appear in this session by themselves. Don't make him fiddle with commands: keep going with the command-line fallback below, and tell him that **any new conversation in this folder** will have WhatsApp built in (no need to close Claude).
 4. **Link WhatsApp (once per computer).** Call `whatsapp_status`. It opens a page in his browser with a QR code. Tell him: *open WhatsApp on your phone → Linked devices (Dispositivos conectados) → Link a device (Conectar um dispositivo) → point the camera at the code*. Call `whatsapp_status` again until it says connected.
 5. Create `clients/` if missing and briefly explain the routine below.
+
+**Command-line fallback** (same service, same rules, for when the `whatsapp` tools are missing from a session):
+`npm run wa -- status` (opens the QR page if needed), `npm run wa -- inbox`, `npm run wa -- read "{\"chat\":\"Maria Silva\"}"`, and likewise `findChat`, `search`, `send`, `sendFile`, `downloadMedia`, `restart` with JSON params named like the tool arguments (`chat`, `text`, `replyTo`, `path`, `caption`, `messageId`, `folder`, `query`, `limit`, `before`). The approval rule for sending applies exactly the same.
 
 If something fails, read the end of `data/service.log`, fix what you can, and explain the rest simply. `whatsapp_status` with `restart=true` solves most connection problems. If WhatsApp was unlinked from the phone, the next `whatsapp_status` shows a new QR code.
 

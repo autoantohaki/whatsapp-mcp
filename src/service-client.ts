@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync, openSync, readFileSync } from "node:fs";
-import { ROOT, ensureDataDir, paths } from "./paths.ts";
+import { ROOT, codeVersion, ensureDataDir, paths } from "./paths.ts";
 import type { ServiceInfo } from "./service.ts";
 
 const START_TIMEOUT_MS = 30_000;
@@ -49,7 +49,27 @@ let launching: Promise<ServiceInfo> | undefined;
  */
 export async function ensureService(): Promise<ServiceInfo> {
   const current = readInfo();
-  if (current && (await healthy(current))) return current;
+  if (current && (await healthy(current))) {
+    if (current.codeVersion === codeVersion()) return current;
+    // The code was updated since this service started: replace it.
+    await fetch(`http://127.0.0.1:${current.port}/shutdown`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${current.token}` },
+      signal: AbortSignal.timeout(5000),
+    }).catch(() => undefined);
+    for (let wait = 0; wait < 40 && existsSync(paths.serviceLock); wait += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    if (existsSync(paths.serviceLock)) {
+      // Services from before /shutdown existed have to be stopped the hard way.
+      try {
+        process.kill(current.pid);
+      } catch {
+        // already gone
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  }
   launching ??= (async () => {
     launchService();
     const deadline = Date.now() + START_TIMEOUT_MS;

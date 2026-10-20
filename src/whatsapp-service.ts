@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import QRCode from "qrcode";
-import type { ChannelStatus, DiscoveredChat, MessagingChannel } from "./domain.ts";
+import type { ChannelStatus, DiscoveredChat, MessagingChannel, NormalizedMessage } from "./domain.ts";
 import { extensionFor, mimeTypeFor } from "./mime.ts";
 import type { MessageStore, StoredChat, StoredMessage } from "./store.ts";
 
@@ -52,8 +52,8 @@ export class WhatsAppService {
     this.now = options.now ?? (() => new Date());
     this.log = options.log ?? (() => undefined);
 
-    this.channel.on("message", (message) => {
-      this.store.saveMessage(message);
+    this.channel.on("message", async (message) => {
+      await this.saveMessage(message);
     });
     this.channel.on("qr", async ({ value }) => {
       this.currentQr = value;
@@ -155,24 +155,66 @@ export class WhatsAppService {
 
   private async runCatchUp(): Promise<void> {
     if (this.channel.status().state !== "ready") return;
+    for (const lid of this.store.lidChatIds()) {
+      await this.canonicalId(lid).catch(() => undefined);
+    }
+    let chats: DiscoveredChat[];
     try {
-      const chats = await this.channel.searchChats({ limit: 40, includeGroups: true });
-      for (const chat of chats) {
-        this.store.saveChat(chat);
-        const stored = this.store.latestMessageAt(chat.chatExternalId);
-        if (chat.lastActivityAt && (!stored || chat.lastActivityAt > stored)) {
-          await this.importHistory(chat.chatExternalId, 50);
-        }
-      }
+      chats = await this.channel.searchChats({ limit: 40, includeGroups: true });
     } catch (cause) {
-      this.log(`Catch-up failed: ${errorMessage(cause)}`);
+      this.log(`Catch-up could not list chats: ${errorMessage(cause)}`);
+      return;
+    }
+    for (const chat of chats) {
+      try {
+        const id = await this.canonicalId(chat.chatExternalId);
+        this.store.saveChat({ ...chat, chatExternalId: id });
+        const stored = this.store.latestMessageAt(id);
+        if (chat.lastActivityAt && (!stored || chat.lastActivityAt > stored)) {
+          await this.importHistory(id, 50);
+        }
+      } catch (cause) {
+        this.log(`Catch-up failed for ${String(chat.chatExternalId)}: ${errorMessage(cause)}`);
+      }
     }
   }
 
+  /**
+   * WhatsApp is moving contacts from phone-number IDs (5511...@c.us) to private
+   * "@lid" IDs, and the same person can show up under both. Everything is
+   * stored under the phone-number ID when WhatsApp tells us which one it is.
+   */
+  private async canonicalId(id: string): Promise<string> {
+    if (!id.endsWith("@lid")) return id;
+    const known = this.store.canonicalFor(id);
+    if (known) return known;
+    if (this.channel.status().state !== "ready") return id;
+    const phoneId = await this.channel.phoneIdFor(id);
+    if (!phoneId || phoneId === id) return id;
+    this.store.addAlias(id, phoneId);
+    return phoneId;
+  }
+
+  private async saveMessage(message: NormalizedMessage): Promise<boolean> {
+    const chatExternalId = await this.canonicalId(String(message.chatExternalId ?? ""));
+    const senderExternalId = await this.canonicalId(String(message.senderExternalId ?? ""));
+    return this.store.saveMessage({ ...message, chatExternalId, senderExternalId });
+  }
+
   private async importHistory(chatId: string, limit: number): Promise<number> {
-    const messages = await this.channel.getRecentMessages({ chatExternalId: chatId, limit });
+    let messages: NormalizedMessage[] | undefined;
+    let lastError: unknown;
+    for (const id of [chatId, ...this.store.aliasesOf(chatId)]) {
+      try {
+        messages = await this.channel.getRecentMessages({ chatExternalId: id, limit });
+        break;
+      } catch (cause) {
+        lastError = cause;
+      }
+    }
+    if (!messages) throw lastError;
     let added = 0;
-    for (const message of messages) if (this.store.saveMessage(message)) added += 1;
+    for (const message of messages) if (await this.saveMessage(message)) added += 1;
     return added;
   }
 
@@ -194,13 +236,13 @@ export class WhatsAppService {
   async resolveChat(reference: string): Promise<string> {
     const ref = reference.trim();
     if (!ref) throw new Error("Say which chat: a name, a phone number, or a chat ID.");
-    if (ref.includes("@")) return ref;
+    if (ref.includes("@")) return this.canonicalId(ref);
     const digits = ref.replace(/[\s()+\-.]/g, "");
     if (/^\d{8,15}$/.test(digits)) {
       this.requireReady();
       const id = await this.channel.resolvePhoneNumber(digits);
       if (!id) throw new Error(`The number ${ref} is not on WhatsApp. Check the country and area code.`);
-      return id;
+      return this.canonicalId(id);
     }
     const matches = await this.findChats(ref);
     const exact = matches.filter((chat) => chat.name.toLocaleLowerCase() === ref.toLocaleLowerCase());
@@ -219,7 +261,8 @@ export class WhatsAppService {
     const byId = new Map<string, StoredChat>();
     if (this.channel.status().state === "ready") {
       const live = await this.channel.searchChats({ text, limit, includeGroups: true, includeArchived: true });
-      for (const chat of live) {
+      for (const found of live) {
+        const chat = { ...found, chatExternalId: await this.canonicalId(found.chatExternalId) };
         this.store.saveChat(chat);
         byId.set(chat.chatExternalId, liveChat(chat));
       }

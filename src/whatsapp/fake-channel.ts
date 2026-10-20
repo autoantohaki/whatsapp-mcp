@@ -32,6 +32,7 @@ export class FakeMessagingChannel implements MessagingChannel {
   private readonly sendsByKey = new Map<string, SendResult>();
   private readonly chats = new Map<string, DiscoveredChat>();
   private readonly media = new Map<string, DownloadedMedia>();
+  private readonly lids = new Map<string, string>();
   private sequence = 0;
   private currentStatus: ChannelStatus;
   private readonly now: () => Date;
@@ -190,6 +191,16 @@ export class FakeMessagingChannel implements MessagingChannel {
     const media = this.media.get(providerMessageId);
     if (!media) throw new Error(`WhatsApp message ${providerMessageId} has no attachment`);
     return media;
+  }
+
+  /** Declares that a test "@lid" ID belongs to a phone-number chat ID. */
+  seedLid(lid: string, phoneId: string): void {
+    this.lids.set(lid, phoneId);
+  }
+
+  async phoneIdFor(lid: string): Promise<string | undefined> {
+    this.assertReady();
+    return this.lids.get(lid);
   }
 
   async resolvePhoneNumber(digits: string): Promise<string | undefined> {

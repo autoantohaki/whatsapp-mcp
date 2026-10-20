@@ -11,7 +11,8 @@
     "start": "node src/mcp.ts",
     "service": "node src/service.ts",
     "test": "vitest run",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "wa": "node --disable-warning=ExperimentalWarning scripts/wa.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

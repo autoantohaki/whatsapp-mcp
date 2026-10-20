@@ -1,4 +1,4 @@
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,4 +20,18 @@ export const paths = {
 
 export function ensureDataDir(): void {
   mkdirSync(DATA_DIR, { recursive: true });
+}
+
+/** Changes whenever the code changes, so an old background service can be replaced. */
+export function codeVersion(): string {
+  let newest = 0;
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path);
+      else newest = Math.max(newest, statSync(path).mtimeMs);
+    }
+  };
+  walk(join(ROOT, "src"));
+  return String(Math.floor(newest));
 }

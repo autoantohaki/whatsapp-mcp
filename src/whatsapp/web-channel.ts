@@ -79,6 +79,9 @@ export interface WhatsAppClientLike {
   getChatById(id: string): Promise<WhatsAppChatLike>;
   getChats?(): Promise<WhatsAppChatLike[]>;
   getNumberId?(number: string): Promise<WhatsAppMessageIdLike | null>;
+  getContactLidAndPhone?(
+    userIds: string[],
+  ): Promise<Array<{ lid?: string; pn?: string }>>;
   getState?(): Promise<string>;
   getWWebVersion?(): Promise<string>;
   readonly pupPage?: {
@@ -418,6 +421,18 @@ export class WhatsAppWebChannel implements MessagingChannel {
     } catch (cause) {
       this.recordError(cause);
       throw asError(cause);
+    }
+  }
+
+  async phoneIdFor(lid: string): Promise<string | undefined> {
+    const client = this.requireReadyClient();
+    if (!client.getContactLidAndPhone) return undefined;
+    try {
+      const [entry] = await client.getContactLidAndPhone([lid]);
+      return entry?.pn || undefined;
+    } catch (cause) {
+      this.recordError(cause);
+      return undefined;
     }
   }
 

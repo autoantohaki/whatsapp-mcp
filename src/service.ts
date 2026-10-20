@@ -6,7 +6,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { AddressInfo } from "node:net";
 import { findSystemBrowser } from "./browser.ts";
 import type { MessagingChannel } from "./domain.ts";
-import { DATA_DIR, ROOT, ensureDataDir, paths } from "./paths.ts";
+import { DATA_DIR, ROOT, codeVersion, ensureDataDir, paths } from "./paths.ts";
 import { MessageStore } from "./store.ts";
 import { FakeMessagingChannel } from "./whatsapp/fake-channel.ts";
 import { WhatsAppWebChannel } from "./whatsapp/web-channel.ts";
@@ -19,6 +19,7 @@ export interface ServiceInfo {
   readonly token: string;
   readonly pid: number;
   readonly startedAt: string;
+  readonly codeVersion: string;
 }
 
 function log(line: string): void {
@@ -91,8 +92,9 @@ const methods: Record<string, Handler> = {
   // Test hooks, only meaningful with WHATSAPP_MCP_FAKE=1.
   fakeInject: async (_service, params, channel) => {
     if (!(channel instanceof FakeMessagingChannel)) throw new Error("Not a test service");
+    if (params.lid) channel.seedLid(params.lid.lid, params.lid.phoneId);
     if (params.media) channel.seedMedia(params.message.providerMessageId, params.media);
-    await channel.injectMessage(params.message);
+    if (params.message) await channel.injectMessage(params.message);
     return { ok: true };
   },
 };
@@ -134,6 +136,11 @@ async function main(): Promise<void> {
         if (!qr) return reply(response, 404, { error: "no QR code right now" });
         return reply(response, 200, await QRCode.toString(qr, { type: "svg", margin: 2 }), "image/svg+xml");
       }
+      if (request.method === "POST" && url.pathname === "/shutdown") {
+        reply(response, 200, { ok: true });
+        setTimeout(() => void shutdown(), 50);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/rpc") {
         const { method, params } = await readBody(request);
         const handler = methods[method];
@@ -152,6 +159,7 @@ async function main(): Promise<void> {
     token,
     pid: process.pid,
     startedAt: new Date().toISOString(),
+    codeVersion: codeVersion(),
   };
   writeFileSync(paths.serviceInfo, JSON.stringify(info, null, 2));
   log(`WhatsApp service listening on 127.0.0.1:${info.port} (data in ${DATA_DIR})`);

@@ -213,6 +213,11 @@ export interface MessagingChannel {
   downloadMedia(providerMessageId: string): Promise<DownloadedMedia>;
   /** Resolves a phone number (digits only) to its chat ID, or undefined when it is not on WhatsApp. */
   resolvePhoneNumber(digits: string): Promise<string | undefined>;
+  /**
+   * WhatsApp now addresses some contacts by a private "@lid" ID instead of
+   * their phone number. Returns the phone-number chat ID for such an ID.
+   */
+  phoneIdFor(lid: string): Promise<string | undefined>;
 }
 
 export function isValidIsoTimestamp(value: string): boolean {

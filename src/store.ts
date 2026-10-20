@@ -66,6 +66,10 @@ export class MessageStore {
         media_size_bytes INTEGER,
         saved_file_path TEXT
       );
+      CREATE TABLE IF NOT EXISTS chat_aliases (
+        alias TEXT PRIMARY KEY,
+        canonical TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS messages_chat_time ON messages (chat_id, occurred_at);
       CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
         text, content='messages', content_rowid='rowid', tokenize='unicode61 remove_diacritics 2'
@@ -83,113 +87,164 @@ export class MessageStore {
     this.db.close();
   }
 
+  /** node:sqlite rejects undefined and objects; WhatsApp Web sometimes hands us both. */
+  private run(sql: string, ...params: unknown[]) {
+    return this.db.prepare(sql).run(...params.map(bindable));
+  }
+
+  private get(sql: string, ...params: unknown[]): Row | undefined {
+    return this.db.prepare(sql).get(...params.map(bindable)) as Row | undefined;
+  }
+
+  private all(sql: string, ...params: unknown[]): Row[] {
+    return this.db.prepare(sql).all(...params.map(bindable)) as Row[];
+  }
+
+  lidChatIds(): string[] {
+    return this.all("SELECT id FROM chats WHERE id LIKE '%@lid'").map((row) => String(row.id));
+  }
+
+  canonicalFor(alias: string): string | undefined {
+    return this.get("SELECT canonical FROM chat_aliases WHERE alias = ?", alias)?.canonical as string | undefined;
+  }
+
+  aliasesOf(canonical: string): string[] {
+    return this.all("SELECT alias FROM chat_aliases WHERE canonical = ?", canonical).map((row) => String(row.alias));
+  }
+
+  /** Records that `alias` is another ID for `canonical` and moves anything saved under it. */
+  addAlias(alias: string, canonical: string): void {
+    if (alias === canonical) return;
+    this.db.exec("BEGIN");
+    try {
+      this.run("INSERT OR REPLACE INTO chat_aliases (alias, canonical) VALUES (?, ?)", alias, canonical);
+      this.run("UPDATE OR IGNORE messages SET chat_id = ? WHERE chat_id = ?", canonical, alias);
+      this.run("UPDATE messages SET sender = ? WHERE sender = ?", canonical, alias);
+      const old = this.get("SELECT * FROM chats WHERE id = ?", alias);
+      if (old) {
+        this.run(
+          `INSERT INTO chats (id, name, kind, last_activity_at, last_checked_at) VALUES (?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             name = CASE WHEN chats.name LIKE '+%' THEN excluded.name ELSE chats.name END,
+             kind = CASE WHEN chats.kind = 'unknown' THEN excluded.kind ELSE chats.kind END,
+             last_activity_at = max(coalesce(chats.last_activity_at, ''), coalesce(excluded.last_activity_at, '')),
+             last_checked_at = max(coalesce(chats.last_checked_at, ''), coalesce(excluded.last_checked_at, ''))`,
+          canonical, old.name, old.kind, old.last_activity_at, old.last_checked_at,
+        );
+        this.run("DELETE FROM chats WHERE id = ?", alias);
+      }
+      this.db.exec("COMMIT");
+    } catch (cause) {
+      this.db.exec("ROLLBACK");
+      throw cause;
+    }
+  }
+
   /** Returns true when the message was new. */
   saveMessage(message: NormalizedMessage): boolean {
-    const result = this.db
-      .prepare(
-        `INSERT OR IGNORE INTO messages
-          (id, chat_id, sender, direction, origin, kind, text, occurred_at,
-           quoted_id, media_mime_type, media_filename, media_size_bytes)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        message.providerMessageId,
-        message.chatExternalId,
-        message.senderExternalId,
-        message.direction,
-        message.origin,
-        message.kind,
-        message.text,
-        message.occurredAt,
-        message.quotedProviderMessageId ?? null,
-        message.media?.mimeType ?? null,
-        message.media?.filename ?? null,
-        message.media?.sizeBytes ?? null,
-      );
-    this.db
-      .prepare(
-        `INSERT INTO chats (id, name, last_activity_at) VALUES (?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET last_activity_at =
-           max(coalesce(chats.last_activity_at, ''), excluded.last_activity_at)`,
-      )
-      .run(message.chatExternalId, displayNameFromId(message.chatExternalId), message.occurredAt);
+    if (!message.providerMessageId || !message.chatExternalId) return false;
+    const result = this.run(
+      `INSERT OR IGNORE INTO messages
+        (id, chat_id, sender, direction, origin, kind, text, occurred_at,
+         quoted_id, media_mime_type, media_filename, media_size_bytes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      message.providerMessageId,
+      message.chatExternalId,
+      message.senderExternalId,
+      message.direction,
+      message.origin,
+      message.kind,
+      message.text ?? "",
+      message.occurredAt,
+      message.quotedProviderMessageId,
+      message.media?.mimeType,
+      message.media?.filename,
+      message.media?.sizeBytes,
+    );
+    this.run(
+      `INSERT INTO chats (id, name, last_activity_at) VALUES (?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET last_activity_at =
+         max(coalesce(chats.last_activity_at, ''), excluded.last_activity_at)`,
+      message.chatExternalId,
+      displayNameFromId(String(message.chatExternalId)),
+      message.occurredAt,
+    );
     return Number(result.changes) > 0;
   }
 
   saveChat(chat: DiscoveredChat): void {
-    this.db
-      .prepare(
-        `INSERT INTO chats (id, name, kind, last_activity_at) VALUES (?, ?, ?, ?)
-         ON CONFLICT(id) DO UPDATE SET name = excluded.name, kind = excluded.kind,
-           last_activity_at = max(coalesce(chats.last_activity_at, ''), coalesce(excluded.last_activity_at, ''))`,
-      )
-      .run(chat.chatExternalId, chat.displayName, chat.kind, chat.lastActivityAt ?? null);
+    if (!chat.chatExternalId) return;
+    this.run(
+      `INSERT INTO chats (id, name, kind, last_activity_at) VALUES (?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET name = excluded.name, kind = excluded.kind,
+         last_activity_at = max(coalesce(chats.last_activity_at, ''), coalesce(excluded.last_activity_at, ''))`,
+      chat.chatExternalId,
+      chat.displayName,
+      chat.kind,
+      chat.lastActivityAt,
+    );
   }
 
   getChat(id: string): StoredChat | undefined {
-    const row = this.db.prepare("SELECT * FROM chats WHERE id = ?").get(id);
+    const row = this.get("SELECT * FROM chats WHERE id = ?", id);
     return row ? toChat(row) : undefined;
   }
 
   findChats(text: string, limit = 20): StoredChat[] {
     const pattern = `%${text.trim().toLocaleLowerCase()}%`;
-    return this.db
-      .prepare(
-        `SELECT * FROM chats WHERE lower(name) LIKE ? OR id LIKE ?
-         ORDER BY last_activity_at DESC LIMIT ?`,
-      )
-      .all(pattern, pattern, limit)
-      .map(toChat);
+    return this.all(
+      `SELECT * FROM chats WHERE lower(name) LIKE ? OR id LIKE ?
+       ORDER BY last_activity_at DESC LIMIT ?`,
+      pattern,
+      pattern,
+      limit,
+    ).map(toChat);
   }
 
   latestMessageAt(chatId: string): string | undefined {
-    const row = this.db
-      .prepare("SELECT max(occurred_at) AS at FROM messages WHERE chat_id = ?")
-      .get(chatId);
+    const row = this.get("SELECT max(occurred_at) AS at FROM messages WHERE chat_id = ?", chatId);
     return (row?.at as string | null) ?? undefined;
   }
 
   countMessages(chatId: string): number {
-    const row = this.db
-      .prepare("SELECT count(*) AS n FROM messages WHERE chat_id = ?")
-      .get(chatId);
-    return Number(row?.n ?? 0);
+    return Number(this.get("SELECT count(*) AS n FROM messages WHERE chat_id = ?", chatId)?.n ?? 0);
   }
 
   /** Newest `limit` messages before `before` (exclusive), returned oldest first. */
   readMessages(chatId: string, limit: number, before?: string): StoredMessage[] {
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM messages WHERE chat_id = ? AND occurred_at < ?
-         ORDER BY occurred_at DESC, rowid DESC LIMIT ?`,
-      )
-      .all(chatId, before ?? "9999", limit);
-    return rows.map(toMessage).reverse();
+    return this.all(
+      `SELECT * FROM messages WHERE chat_id = ? AND occurred_at < ?
+       ORDER BY occurred_at DESC, rowid DESC LIMIT ?`,
+      chatId,
+      before ?? "9999",
+      limit,
+    )
+      .map(toMessage)
+      .reverse();
   }
 
   getMessage(id: string): StoredMessage | undefined {
-    const row = this.db.prepare("SELECT * FROM messages WHERE id = ?").get(id);
+    const row = this.get("SELECT * FROM messages WHERE id = ?", id);
     return row ? toMessage(row) : undefined;
   }
 
   markChecked(chatId: string, at: string): void {
-    this.db.prepare("UPDATE chats SET last_checked_at = ? WHERE id = ?").run(at, chatId);
+    this.run("UPDATE chats SET last_checked_at = ? WHERE id = ?", at, chatId);
   }
 
   setSavedFilePath(messageId: string, path: string): void {
-    this.db.prepare("UPDATE messages SET saved_file_path = ? WHERE id = ?").run(path, messageId);
+    this.run("UPDATE messages SET saved_file_path = ? WHERE id = ?", path, messageId);
   }
 
   /** Chats with inbound messages Claude has not looked at yet. */
   inbox(limit = 30): InboxEntry[] {
-    const rows = this.db
-      .prepare(
-        `SELECT c.*, count(m.id) AS new_messages, max(m.occurred_at) AS newest
-         FROM chats c JOIN messages m ON m.chat_id = c.id
-         WHERE m.direction = 'inbound' AND m.occurred_at > coalesce(c.last_checked_at, '')
-         GROUP BY c.id ORDER BY newest DESC LIMIT ?`,
-      )
-      .all(limit);
+    const rows = this.all(
+      `SELECT c.*, count(m.id) AS new_messages, max(m.occurred_at) AS newest
+       FROM chats c JOIN messages m ON m.chat_id = c.id
+       WHERE m.direction = 'inbound' AND m.occurred_at > coalesce(c.last_checked_at, '')
+       GROUP BY c.id ORDER BY newest DESC LIMIT ?`,
+      limit,
+    );
     return rows.map((row) => {
       const chat = toChat(row);
       const [latest] = this.readMessages(chat.id, 1);
@@ -205,7 +260,7 @@ export class MessageStore {
       WHERE messages_fts MATCH ? ${options.chatId ? "AND m.chat_id = ?" : ""}
       ORDER BY m.occurred_at DESC LIMIT ?`;
     const params = options.chatId ? [match, options.chatId, limit] : [match, limit];
-    return this.db.prepare(sql).all(...params).map(toMessage);
+    return this.all(sql, ...params).map(toMessage);
   }
 }
 
@@ -224,6 +279,16 @@ function displayNameFromId(id: string): string {
 }
 
 type Row = Record<string, unknown>;
+type Bindable = string | number | bigint | null | Uint8Array;
+
+function bindable(value: unknown): Bindable {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "string" || typeof value === "number" || typeof value === "bigint") return value;
+  if (typeof value === "boolean") return value ? 1 : 0;
+  if (value instanceof Uint8Array) return value;
+  const serialized = (value as { _serialized?: unknown })._serialized;
+  return typeof serialized === "string" ? serialized : JSON.stringify(value);
+}
 
 function optional<T>(value: unknown): T | undefined {
   return value === null || value === undefined ? undefined : (value as T);

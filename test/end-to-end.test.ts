@@ -21,7 +21,11 @@ async function call(client: Client, name: string, args: Record<string, unknown> 
   return output;
 }
 
-async function inject(message: Partial<NormalizedMessage> & { providerMessageId: string; text: string }, media?: object) {
+async function inject(
+  message: Partial<NormalizedMessage> & { providerMessageId: string; text: string },
+  media?: object,
+  lid?: { lid: string; phoneId: string },
+) {
   const info = JSON.parse(readFileSync(join(dataDir, "service.json"), "utf8"));
   const full: NormalizedMessage = {
     provider: "fake",
@@ -36,7 +40,7 @@ async function inject(message: Partial<NormalizedMessage> & { providerMessageId:
   const response = await fetch(`http://127.0.0.1:${info.port}/rpc`, {
     method: "POST",
     headers: { authorization: `Bearer ${info.token}`, "content-type": "application/json" },
-    body: JSON.stringify({ method: "fakeInject", params: { message: full, media } }),
+    body: JSON.stringify({ method: "fakeInject", params: { message: full, media, lid } }),
   });
   expect(await response.json()).toEqual({ result: { ok: true } });
 }
@@ -136,6 +140,18 @@ describe("WhatsApp MCP end to end (fake WhatsApp)", () => {
     expect(path).toContain("contrato.pdf");
     expect(readFileSync(path, "utf8")).toBe("%PDF contract");
     expect(await call(first.client, "whatsapp_read", { chat: "5511999990001@c.us" })).toContain(`saved at ${path}`);
+  });
+
+  it("files messages from a private @lid ID under the client's phone number", async () => {
+    await inject(
+      { providerMessageId: "in-lid", text: "Mensagem pelo novo ID", chatExternalId: "99887766@lid", senderExternalId: "99887766@lid" },
+      undefined,
+      { lid: "99887766@lid", phoneId: "5511999990001@c.us" },
+    );
+    const read = await call(first.client, "whatsapp_read", { chat: "5511999990001@c.us" });
+    expect(read).toContain("Mensagem pelo novo ID");
+    expect(read).toContain("procuracao.pdf");
+    expect(await call(first.client, "whatsapp_read", { chat: "99887766@lid" })).toContain("Mensagem pelo novo ID");
   });
 
   it("explains unknown chats instead of guessing", async () => {
