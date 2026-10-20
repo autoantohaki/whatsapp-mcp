@@ -1,0 +1,26 @@
+{
+  "enableAllProjectMcpServers": true,
+  "permissions": {
+    "allow": [
+      "mcp__whatsapp__whatsapp_status",
+      "mcp__whatsapp__whatsapp_inbox",
+      "mcp__whatsapp__whatsapp_find_chat",
+      "mcp__whatsapp__whatsapp_read",
+      "mcp__whatsapp__whatsapp_search",
+      "mcp__whatsapp__whatsapp_download_media"
+    ],
+    "ask": [
+      "mcp__whatsapp__whatsapp_send",
+      "mcp__whatsapp__whatsapp_send_file"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          { "type": "command", "command": "node scripts/check-setup.mjs", "timeout": 20 }
+        ]
+      }
+    ]
+  }
+}

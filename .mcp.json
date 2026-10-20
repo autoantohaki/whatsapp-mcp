@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "whatsapp": {
+      "command": "node",
+      "args": ["--disable-warning=ExperimentalWarning", "src/mcp.ts"]
+    }
+  }
+}
